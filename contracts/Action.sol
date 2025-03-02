@@ -131,6 +131,5 @@ contract Auction{
        
        //sends value to the recipient
        recipient.transfer(value);
-     
     } 
 }
