@@ -1,135 +1,137 @@
-//SPDX-License-Identifier: GPL-3.0
- 
-pragma solidity >=0.5.0 <0.9.0;
- 
-contract Auction{
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity >=0.8.0;
+
+contract Auction {
     address payable public owner;
-    uint public startBlock;
-    uint public endBlock;
+    uint256 public startBlock;
+    uint256 public endBlock;
     string public ipfsHash;
- 
+
     enum State {Started, Running, Ended, Canceled}
     State public auctionState;
-    
-    uint public highestBindingBid;
-    
+
+    uint256 public highestBindingBid;
     address payable public highestBidder;
-    mapping(address => uint) public bids;
-    uint bidIncrement;
-    
-    //the owner can finalize the auction and get the highestBindingBid only once
+    mapping(address => uint256) public bids;
+    uint256 public bidIncrement;
+
     bool public ownerFinalized = false;
- 
-    constructor(){
+    bool internal locked; // for reentrancy guard
+
+    // Events
+    event BidPlaced(address indexed bidder, uint256 bid);
+    event AuctionCanceled();
+    event AuctionFinalized(address indexed recipient, uint256 value);
+
+    constructor() {
         owner = payable(msg.sender);
         auctionState = State.Running;
-        
+
         startBlock = block.number;
         endBlock = startBlock + 3;
-      
+
         ipfsHash = "";
-        bidIncrement = 1000000000000000000; // bidding in multiple of ETH
+        bidIncrement = 1 ether;
     }
-    
-    // declaring function modifiers
-    modifier notOwner(){
-        require(msg.sender != owner);
+
+    // Modifiers
+    modifier notOwner() {
+        require(msg.sender != owner, "Owner cannot perform this action");
         _;
     }
-    
-    modifier onlyOwner(){
-        require(msg.sender == owner);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can perform this action");
         _;
     }
-    
-    modifier afterStart(){
-        require(block.number >= startBlock);
+
+    modifier afterStart() {
+        require(block.number >= startBlock, "Auction has not started yet");
         _;
     }
-    
-    modifier beforeEnd(){
-        require(block.number <= endBlock);
+
+    modifier beforeEnd() {
+        require(block.number <= endBlock, "Auction has ended");
         _;
     }
-    
-    //a helper pure function (it neither reads, nor it writes to the blockchain)
-    function min(uint a, uint b) pure internal returns(uint){
-        if (a <= b){
-            return a;
-        }else{
-            return b;
-        }
+
+    modifier noReentrancy() {
+        require(!locked, "No reentrancy");
+        locked = true;
+        _;
+        locked = false;
     }
-    
-    // only the owner can cancel the Auction before the Auction has ended
-    function cancelAuction() public beforeEnd onlyOwner{
+
+    // Fallback to receive ETH directly
+    receive() external payable {
+        placeBid();
+    }
+
+    function min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a <= b ? a : b;
+    }
+
+    function cancelAuction() public onlyOwner beforeEnd {
+        require(auctionState == State.Running, "Auction must be running");
         auctionState = State.Canceled;
+        emit AuctionCanceled();
     }
-    
-    
-    // the main function called to place a bid
-    function placeBid() public payable notOwner afterStart beforeEnd returns(bool){
-        // to place a bid auction should be running
-        require(auctionState == State.Running);
-        // minimum value allowed to be sent
-        // require(msg.value > 0.0001 ether);
-        
-        uint currentBid = bids[msg.sender] + msg.value;
-        
-        // the currentBid should be greater than the highestBindingBid. 
-        // Otherwise there's nothing to do.
-        require(currentBid > highestBindingBid);
-        
-        // updating the mapping variable
+
+    function placeBid() public payable notOwner afterStart beforeEnd returns (bool) {
+        require(auctionState == State.Running, "Auction is not running");
+        require(msg.value >= bidIncrement, "Minimum bid increment not met");
+
+        uint256 currentBid = bids[msg.sender] + msg.value;
+        require(currentBid > highestBindingBid, "Bid too low");
+
         bids[msg.sender] = currentBid;
-        
-        if (currentBid <= bids[highestBidder]){ // highestBidder remains unchanged
+
+        if (currentBid <= bids[highestBidder]) {
             highestBindingBid = min(currentBid + bidIncrement, bids[highestBidder]);
-        }else{ // highestBidder is another bidder
-             highestBindingBid = min(currentBid, bids[highestBidder] + bidIncrement);
-             highestBidder = payable(msg.sender);
+        } else {
+            highestBindingBid = min(currentBid, bids[highestBidder] + bidIncrement);
+            highestBidder = payable(msg.sender);
         }
-    return true;
+
+        emit BidPlaced(msg.sender, currentBid);
+        return true;
     }
-    
-    
-    
-    function finalizeAuction() public{
-       // the auction has been Canceled or Ended
-       require(auctionState == State.Canceled || block.number > endBlock); 
-       
-       // only the owner or a bidder can finalize the auction
-       require(msg.sender == owner || bids[msg.sender] > 0);
-       
-       // the recipient will get the value
-       address payable recipient;
-       uint value;
-       
-       if(auctionState == State.Canceled){ // auction canceled, not ended
-           recipient = payable(msg.sender);
-           value = bids[msg.sender];
-       }else{// auction ended, not canceled
-           if(msg.sender == owner && ownerFinalized == false){ //the owner finalizes the auction
-               recipient = owner;
-               value = highestBindingBid;
-               
-               //the owner can finalize the auction and get the highestBindingBid only once
-               ownerFinalized = true; 
-           }else{// another user (not the owner) finalizes the auction
-               if (msg.sender == highestBidder){
-                   recipient = highestBidder;
-                   value = bids[highestBidder] - highestBindingBid;
-               }else{ //this is neither the owner nor the highest bidder (it's a regular bidder)
-                   recipient = payable(msg.sender);
-                   value = bids[msg.sender];
-               }
-           }
-       }
-       
-       // resetting the bids of the recipient to avoid multiple transfers to the same recipient
-       bids[recipient] = 0;
-       
-       //sends value to the recipient
-       recipient.transfer(value);
-    } 
+
+    function finalizeAuction() public noReentrancy {
+        require(
+            auctionState == State.Canceled || block.number > endBlock,
+            "Auction is not over or canceled"
+        );
+        require(
+            msg.sender == owner || bids[msg.sender] > 0,
+            "Not authorized to finalize"
+        );
+
+        address payable recipient;
+        uint256 value;
+
+        if (auctionState == State.Canceled) {
+            recipient = payable(msg.sender);
+            value = bids[msg.sender];
+        } else {
+            if (msg.sender == owner && !ownerFinalized) {
+                recipient = owner;
+                value = highestBindingBid;
+                ownerFinalized = true;
+            } else if (msg.sender == highestBidder) {
+                recipient = highestBidder;
+                value = bids[highestBidder] - highestBindingBid;
+            } else {
+                recipient = payable(msg.sender);
+                value = bids[msg.sender];
+            }
+        }
+
+        bids[recipient] = 0;
+
+        (bool sent, ) = recipient.call{value: value}("");
+        require(sent, "Failed to send Ether");
+
+        emit AuctionFinalized(recipient, value);
+    }
 }
